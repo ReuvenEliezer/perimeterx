@@ -2,34 +2,64 @@ package com.perimeterx.services;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.stereotype.Service;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.*;
 
 @Service
 public class RateLimiterServiceImpl implements RateLimiterService {
 
     private static final Logger logger = LogManager.getLogger(RateLimiterServiceImpl.class);
-    private static Map<Integer, Queue<LocalDateTime>> hashUrlReqToTimeMap = new ConcurrentHashMap<>();
+    private static Map<String, LinkedBlockingDeque<LocalDateTime>> hashUrlReqToTimeMap = new ConcurrentHashMap<>();
     private static Duration timeIntervalBetweenRequests;
     private static long totalAllowReqInIntervalTime;
+    private ScheduledFuture<?> cleanOldRequestsMapFuture = null;
+
+    @Autowired
+    private PerimeterScheduler perimeterScheduler;
 
     public RateLimiterServiceImpl(ApplicationArguments applicationArgument) {
         setParams(applicationArgument);
     }
 
+
+    @PostConstruct()
+    private void initCleanOldRequestsFromMap() {
+        if (cleanOldRequestsMapFuture == null) {
+            cleanOldRequestsMapFuture = perimeterScheduler.scheduleWithFixedDelay(this::cleanOldRequestsFromMap,
+                    timeIntervalBetweenRequests.toMillis(), timeIntervalBetweenRequests.toMillis(), TimeUnit.MILLISECONDS);
+            //TODO * 10
+        }
+    }
+
+    private void cleanOldRequestsFromMap() {
+        logger.info("clearMap");
+        hashUrlReqToTimeMap.forEach((key, value) -> {
+            if (value == null || value.isEmpty() || value.getLast().plusSeconds(timeIntervalBetweenRequests.getSeconds()).isBefore(LocalDateTime.now())) {
+                logger.info("remove key=[{}] with values size={} because of the last req is from {}. (passed timeIntervalBetweenRequests {})", key, value.size(), value.getLast(), timeIntervalBetweenRequests);
+                hashUrlReqToTimeMap.remove(key);
+            }
+        });
+    }
+
     @Override
     public boolean isReachedLimitation(String url) {
         LocalDateTime now = LocalDateTime.now();
-        //BlockingQueue is thread safe
-        Queue<LocalDateTime> lastReqTimeQueue = hashUrlReqToTimeMap.computeIfAbsent(url.hashCode(), q -> new LinkedBlockingQueue<>());
+        logger.info("url={}", url);
+        /**
+         * https://stackoverflow.com/questions/3362018/is-linkedlist-thread-safe-when-im-accessing-it-with-offer-and-poll-exclusively
+         //BlockingQueue is thread safe
+         */
+        Queue<LocalDateTime> lastReqTimeQueue = hashUrlReqToTimeMap.computeIfAbsent(url, q -> new LinkedBlockingDeque<>());
         boolean isReachedLimitation = isReachedLimitation(now, lastReqTimeQueue);
         lastReqTimeQueue.add(now);
 
@@ -67,6 +97,14 @@ public class RateLimiterServiceImpl implements RateLimiterService {
             throw new IllegalArgumentException("the second arg [totalAllowReqInIntervalTime] must be a long value", e);
         }
         logger.info("run app with timeIntervalBetweenRequests=[{}], totalAllowReqInIntervalTime[{}]", timeIntervalBetweenRequests, totalAllowReqInIntervalTime);
+    }
+
+    @PreDestroy
+    private final void stop() {
+        logger.info("stopping");
+        if (cleanOldRequestsMapFuture != null)
+            cleanOldRequestsMapFuture.cancel(false);
+        cleanOldRequestsMapFuture = null;
     }
 
 }

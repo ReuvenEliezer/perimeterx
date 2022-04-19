@@ -8,3 +8,8 @@ spring:
       enabled: always
 server:
   port: 8080
+
+scheduler:
+  thread:
+    pool:
+      size: 1
